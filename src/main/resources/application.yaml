@@ -8,3 +8,12 @@ spring:
     username: root
     password: ''
     driver-class-name: com.mysql.cj.jdbc.Driver
+
+#  flyway:
+#    enabled: true
+#    locations: classpath:db/migration
+#    baseline-on-migrate: true
+
+logging:
+  level:
+    com.spirodelaz.report: DEBUG
