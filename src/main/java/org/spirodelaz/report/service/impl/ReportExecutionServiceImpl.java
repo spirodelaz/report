@@ -1,5 +1,6 @@
 package org.spirodelaz.report.service.impl;
 
+import lombok.extern.slf4j.Slf4j;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.spirodelaz.report.dto.ExecuteReportRequest;
@@ -10,6 +11,7 @@ import org.spirodelaz.report.entity.QueryDefinitionEntity;
 import org.spirodelaz.report.service.*;
 import org.spirodelaz.report.util.JsonUtils;
 import com.fasterxml.jackson.core.type.TypeReference;
+import org.spirodelaz.report.util.ResultMappingUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +20,8 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.*;
 
+
+@Slf4j
 @Service
 public class ReportExecutionServiceImpl implements ReportExecutionService {
 
@@ -48,24 +52,24 @@ public class ReportExecutionServiceImpl implements ReportExecutionService {
         String sql = request.getSqlText();
         String chartTypeCode = request.getChartTypeCode();
 
-        // 1. 规范化 SQL 文本
-        if (sql == null || sql.isBlank()) {
-            throw new IllegalArgumentException("sqlText is required.");
-        }
+        if (sql == null || sql.isBlank()) throw new IllegalArgumentException("sqlText is required.");
+        if (chartTypeCode == null || chartTypeCode.isBlank())
+            throw new IllegalArgumentException("chartTypeCode is required.");
+
         sql = sql.replaceAll("\\s+", " ").trim();
 
-        if (chartTypeCode == null || chartTypeCode.isBlank()) {
-            throw new IllegalArgumentException("chartTypeCode is required.");
-        }
+        log.info("执行SQL语句: {}", sql);
 
-        // 2. 查找图表类型
+        // 查询图表类型
         ChartTypeEntity chartType = chartTypeService.findByCode(chartTypeCode)
                 .orElseThrow(() -> new IllegalArgumentException("Unsupported chart type: " + chartTypeCode));
 
-        // 3. 执行 SQL 并获取原始结果。如果 SQL 无效，这里会抛出异常
+        // 执行 SQL 获取原始结果
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
 
-        // 4. 针对'indicator'图表类型，如果返回多行数据，则重新执行聚合查询
+        log.info("执行结果为: {}", rows);
+
+        // 针对 indicator 类型做智能聚合
         if ("indicator".equals(chartTypeCode) && rows.size() > 1) {
             Map<String, String> smartMapping = smartMapColumns(rows, chartType);
             String valueColumn = smartMapping.get("value");
@@ -75,7 +79,7 @@ public class ReportExecutionServiceImpl implements ReportExecutionService {
             }
         }
 
-        // 5. 再次查找或保存查询定义 (执行成功后再进行持久化操作)
+        // 查询或创建 QueryDefinition
         String finalSql = sql;
         QueryDefinitionEntity queryDef = queryDefinitionService.findBySqlText(sql)
                 .orElseGet(() -> {
@@ -86,26 +90,21 @@ public class ReportExecutionServiceImpl implements ReportExecutionService {
                     return queryDefinitionService.save(newQueryDef);
                 });
 
-        // 6. 确定列映射
-        Map<String, String> mapping = new HashMap<>();
-
-        Optional<QueryChartMappingEntity> mappingEntityOpt =
-                queryChartMappingService.findByQueryIdAndChartTypeCode(queryDef.getId(), chartType.getTypeCode());
-        if (mappingEntityOpt.isPresent()) {
-            String json = mappingEntityOpt.get().getColumnMappings();
-            mapping = JsonUtils.fromJson(json, new TypeReference<Map<String, String>>() {});
-        }
-
-        if (mapping == null || mapping.isEmpty()) {
-            mapping = smartMapColumns(rows, chartType);
-        }
+        // 获取列映射规则
+        List<Map<String, Object>> finalRows = rows;
+        Map<String, String> mapping = queryChartMappingService.findByQueryIdAndChartTypeCode(
+                        queryDef.getId(), chartType.getTypeCode())
+                .map(QueryChartMappingEntity::getColumnMappings)
+                .map(json -> JsonUtils.fromJson(json, new TypeReference<Map<String, String>>() {}))
+                .orElseGet(() -> smartMapColumns(finalRows, chartType));
 
         if (mapping.isEmpty()) {
-            mapping = JsonUtils.fromJson(chartType.getDefaultMappingTemplate(), new TypeReference<Map<String, String>>() {});
+            mapping = JsonUtils.fromJson(chartType.getDefaultMappingTemplate(),
+                    new TypeReference<Map<String, String>>() {});
             if (mapping == null) mapping = new HashMap<>();
         }
 
-        // 7. 保存查询结果到数据库
+        // 保存查询结果到数据库
         try {
             String resultJson = objectMapper.writeValueAsString(rows);
             queryResultDataService.saveOrUpdateResult(queryDef.getId(), resultJson);
@@ -113,41 +112,14 @@ public class ReportExecutionServiceImpl implements ReportExecutionService {
             throw new RuntimeException("Failed to convert result to JSON for saving.", e);
         }
 
-        // 8. 格式化响应
+        // 使用 ResultMappingUtils 映射成前端图表数据
+        List<Map<String, Object>> chartData = ResultMappingUtils.applyMapping(rows, mapping);
+
         ExecuteReportResponse resp = new ExecuteReportResponse();
         resp.setChartType(chartType.getTypeCode());
         resp.setRawResult(rows);
         resp.setUsedMapping(mapping);
-
-        switch (chartType.getTypeCode()) {
-            case "indicator":
-                String valueField = mapping.getOrDefault("value", "value");
-                Object indicatorValueObj = null;
-                if (!rows.isEmpty()) {
-                    indicatorValueObj = rows.get(0).get(valueField);
-                }
-                resp.setChartData(toNumberIfPossible(indicatorValueObj));
-                break;
-
-            case "pie":
-            case "bar":
-            case "line":
-                String labelField = mapping.getOrDefault("label", "label");
-                String valField = mapping.getOrDefault("value", "value");
-                List<Map<String, Object>> data = new ArrayList<>();
-                for (Map<String, Object> r : rows) {
-                    Map<String, Object> item = new LinkedHashMap<>();
-                    item.put("label", r.get(labelField));
-                    item.put("value", toNumberIfPossible(r.get(valField)));
-                    data.add(item);
-                }
-                resp.setChartData(data);
-                break;
-
-            default:
-                resp.setChartData(rows);
-                break;
-        }
+        resp.setChartData(chartData);
 
         return resp;
     }

@@ -12,10 +12,10 @@ import java.util.Optional;
 @Service
 public class QueryResultDataServiceImpl implements QueryResultDataService {
 
-    private final QueryResultDataMapper mapper;
+    private final QueryResultDataMapper queryResultDataMapper;
 
-    public QueryResultDataServiceImpl(QueryResultDataMapper mapper) {
-        this.mapper = mapper;
+    public QueryResultDataServiceImpl(QueryResultDataMapper queryResultDataMapper) {
+        this.queryResultDataMapper = queryResultDataMapper;
     }
 
 //    @Override
@@ -31,27 +31,23 @@ public class QueryResultDataServiceImpl implements QueryResultDataService {
     @Override
     public QueryResultDataEntity saveOrUpdateResult(Long queryId, String resultJson) {
         // Find existing record by queryId
-        Optional<QueryResultDataEntity> existingResult = mapper.selectList(
+        QueryResultDataEntity entity = queryResultDataMapper.selectOne(
                 new QueryWrapper<QueryResultDataEntity>().eq("query_id", queryId)
-        ).stream().findFirst();
+        );
 
-        QueryResultDataEntity entity;
-        if (existingResult.isPresent()) {
-            // If exists, update it
-            entity = existingResult.get();
-            entity.setResultData(resultJson);
-            entity.setCreatedAt(LocalDateTime.now());
-            // You can also add logic to update expire_at here if you have that field.
-            mapper.updateById(entity);
-        } else {
-            // If it doesn't exist, insert a new record
+        if (entity == null) {
             entity = new QueryResultDataEntity();
             entity.setQueryId(queryId);
-            entity.setResultData(resultJson);
             entity.setCreatedAt(LocalDateTime.now());
-            // Set expire_at based on your business logic, for example:
-            // entity.setExpireAt(LocalDateTime.now().plusHours(1));
-            mapper.insert(entity);
+        }
+
+        entity.setResultData(resultJson);
+        entity.setExpireAt(LocalDateTime.now().plusHours(1));
+        entity.setCreatedAt(LocalDateTime.now());
+        if (entity.getId() == null) {
+            queryResultDataMapper.insert(entity);
+        } else {
+            queryResultDataMapper.updateById(entity);
         }
 
         return entity;
