@@ -3,14 +3,27 @@ package org.spirodelaz.report.dto;
 import lombok.Data;
 
 import java.util.List;
-import java.util.Map;
 
 @Data
 public class ExecuteReportResponse {
-    private String chartType;
-//    private Number indicatorValue;
-    private Object chartData;
-    private List<Map<String, Object>> rawResult;
-    private Map<String, String> usedMapping;
-}
 
+    /**
+     * 列信息（元数据）
+     */
+    private List<ColumnMeta> columns;
+
+    /**
+     * 数据值，每一行对应一个 List<CellValue>
+     */
+    private List<List<CellValue>> values;
+
+    @Data
+    public static class ColumnMeta {
+        private String column;      // 列名（如 product_name, total_amount）
+    }
+
+    @Data
+    public static class CellValue {
+        private Object value;     // 单元格值
+    }
+}
